@@ -13,24 +13,22 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
     private static final Object[] EMPTY_ARRAY = new Object[]{};
     private static final Object NULL_OBJECT = new Object();
 
-    private final DirectedAcyclicGraph<Class<?>, DefaultEdge> classesGraph = new DirectedAcyclicGraph<>(DefaultEdge.class);
-    private final DirectedAcyclicGraph<Class<?>, DefaultEdge> dependenciesGraph = new DirectedAcyclicGraph<>(DefaultEdge.class);
+    private final DirectedAcyclicGraph<Class<?>, DefaultEdge> contextGraph = new DirectedAcyclicGraph<>(DefaultEdge.class);
+    private final Map<Class<?>, Object> instancesCtx = new HashMap<>();
 
     public ConfigurationClassApplicationContext(Collection<ServiceDefinition> configurations) {
-        classesGraph.addVertex(Object.class);
-        Map<Class<?>, Object> instancesCtx = new HashMap<>();
+        contextGraph.addVertex(Object.class);
 
         for (ServiceDefinition configuration : configurations) {
             Class sourceClass = configuration.getSourceClass();
 
-            fillGraphByClass(classesGraph, sourceClass);
-            dependenciesGraph.addVertex(sourceClass);
+            fillGraphByClass(contextGraph, sourceClass);
             instancesCtx.put(sourceClass, NULL_OBJECT);
         }
 
-        fillDependenciesGraph(classesGraph, dependenciesGraph);
+        fillDependenciesGraph(contextGraph, instancesCtx);
 
-        TopologicalOrderIterator<Class<?>, DefaultEdge> graphIterator = new TopologicalOrderIterator<>(classesGraph);
+        TopologicalOrderIterator<Class<?>, DefaultEdge> graphIterator = new TopologicalOrderIterator<>(contextGraph);
         while (graphIterator.hasNext()) {
             Class<?> next = graphIterator.next();
             if (!instancesCtx.containsKey(next)) {
@@ -47,7 +45,7 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
     }
 
     DirectedAcyclicGraph<Class<?>, DefaultEdge> getContextGraph() {
-        return null;
+        return contextGraph;
     }
 
     private Object constructObject(Constructor<?> constructor, Object[] args) {
@@ -69,7 +67,7 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
 
         for (Class<?> anInterface : interfaces) {
             contextGraph.addVertex(anInterface);
-            contextGraph.addEdge(clazz, anInterface);
+            contextGraph.addEdge(anInterface, clazz);
 
             fillGraphByClass(contextGraph, anInterface);
         }
@@ -84,14 +82,14 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
         fillGraphByClass(contextGraph, superclass);
     }
 
-    private void fillDependenciesGraph(
-            DirectedAcyclicGraph<Class<?>, DefaultEdge> classesGraph,
-            DirectedAcyclicGraph<Class<?>, DefaultEdge> dependenciesGraph) {
-
+    private void fillDependenciesGraph(DirectedAcyclicGraph<Class<?>, DefaultEdge> classesGraph, Map<Class<?>, Object> instancesCtx) {
         List<Pair<Class<?>, Class<?>>> edges = new ArrayList<>();
-        Set<Class<?>> services = dependenciesGraph.vertexSet();
 
-        for (Class<?> clazz : services) {
+        for (Class<?> clazz : classesGraph) {
+            if (!instancesCtx.containsKey(clazz)) {
+                continue;
+            }
+
             Constructor<?>[] constructors = clazz.getConstructors();
             if (constructors.length != 1) {
                 throw new IllegalArgumentException("Find more than 1 constructor in " + clazz.getName());
@@ -100,7 +98,17 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
             Constructor<?> constructor = constructors[0];
             for (Parameter parameter : constructor.getParameters()) {
                 Class<?> parameterType = parameter.getType();
-                edges.add(Pair.of(clazz, parameterType));
+
+                if (instancesCtx.containsKey(parameterType)) {
+                    edges.add(Pair.of(parameterType, clazz));
+                } else {
+                    for (Class<?> descendant : classesGraph.getDescendants(parameterType)) {
+                        if (instancesCtx.containsKey(descendant)) {
+                            edges.add(Pair.of(descendant, clazz));
+                            break;
+                        }
+                    }
+                }
             }
         }
 
@@ -108,10 +116,7 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
             Class<?> source = edge.getLeft();
             Class<?> dependency = edge.getRight();
 
-            Set<DefaultEdge> dependencyEdges = classesGraph.edgesOf(dependency);
-            for (DefaultEdge dependencyEdge : dependencyEdges) {
-                System.out.println(classesGraph.getEdgeTarget(dependencyEdge));
-            }
+            contextGraph.addEdge(source, dependency);
         }
     }
 }

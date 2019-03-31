@@ -16,12 +16,10 @@ public class ConfigurationTest {
         ConfigurationClassApplicationContext ctx = new ConfigurationClassApplicationContext(Arrays.asList(
                 new ServiceDefinition(Bar.class),
                 new ServiceDefinition(Foo.class),
-                new ServiceDefinition(Baz.class),
-                new ServiceDefinition(Buz.class),
                 new ServiceDefinition(Biz.class)));
 
         GraphExporter exporter = new DOTExporter(
-                x -> x.toString().replace(' ', '_').replace('.', '_').replace('$', '_'),
+                x -> Integer.toString(x.hashCode()),
                 Object::toString,
                 null);
         exporter.exportGraph(ctx.getContextGraph(), System.out);
@@ -35,20 +33,18 @@ public class ConfigurationTest {
     public static class Foo implements IntegerFunction {
         @Override
         public Integer apply(Integer integer) {
-            return integer + 1;
+            return 42;
         }
     }
 
     public static class Bar implements Consumer<Integer> {
-        private final Function<Integer, Integer> mapFunction;
-
         public Bar(Function<Integer, Integer> mapFunction) {
-            this.mapFunction = mapFunction;
+
         }
 
         @Override
         public void accept(Integer aInteger) {
-            this.mapFunction.apply(aInteger);
+
         }
     }
 
@@ -58,23 +54,6 @@ public class ConfigurationTest {
 
         @Override
         public Integer get() {
-            return 42;
-        }
-    }
-
-    public static class Baz implements Supplier<Integer> {
-        public Baz(Bar bar) {
-        }
-
-        @Override
-        public Integer get() {
-            return 42;
-        }
-    }
-
-    public static class Buz implements Function<Integer, Integer> {
-        @Override
-        public Integer apply(Integer integer) {
             return 42;
         }
     }
