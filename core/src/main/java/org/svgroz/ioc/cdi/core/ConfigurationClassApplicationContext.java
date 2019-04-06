@@ -2,10 +2,10 @@ package org.svgroz.ioc.cdi.core;
 
 import org.jgrapht.graph.DefaultEdge;
 import org.jgrapht.graph.DirectedAcyclicGraph;
-import org.jgrapht.traverse.TopologicalOrderIterator;
-import org.svgroz.ioc.cdi.core.util.Pair;
+import org.jgrapht.traverse.DepthFirstIterator;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
 import java.util.*;
 
@@ -13,30 +13,23 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
     private static final Object[] EMPTY_ARRAY = new Object[]{};
     private static final Object NULL_OBJECT = new Object();
 
-    private final DirectedAcyclicGraph<Class<?>, DefaultEdge> contextGraph = new DirectedAcyclicGraph<>(DefaultEdge.class);
-    private final Map<Class<?>, Object> instancesCtx = new HashMap<>();
+    final DirectedAcyclicGraph<Class<?>, DefaultEdge> classesGraph = new DirectedAcyclicGraph<>(DefaultEdge.class);
+    final DirectedAcyclicGraph<Class<?>, DefaultEdge> dependencyGraph = new DirectedAcyclicGraph<>(DefaultEdge.class);
+    final Map<Class<?>, Object> context = new HashMap<>();
 
     public ConfigurationClassApplicationContext(Collection<ServiceDefinition> configurations) {
-        contextGraph.addVertex(Object.class);
+        classesGraph.addVertex(Object.class);
 
         for (ServiceDefinition configuration : configurations) {
             Class sourceClass = configuration.getSourceClass();
 
-            fillGraphByClass(contextGraph, sourceClass);
-            instancesCtx.put(sourceClass, NULL_OBJECT);
+            fillGraphByClass(classesGraph, sourceClass);
+            dependencyGraph.addVertex(sourceClass);
+            context.put(sourceClass, NULL_OBJECT);
         }
 
-        fillDependenciesGraph(contextGraph, instancesCtx);
+        fillDependenciesGraph(classesGraph, dependencyGraph);
 
-        TopologicalOrderIterator<Class<?>, DefaultEdge> graphIterator = new TopologicalOrderIterator<>(contextGraph);
-        while (graphIterator.hasNext()) {
-            Class<?> next = graphIterator.next();
-            if (!instancesCtx.containsKey(next)) {
-                continue;
-            }
-
-            System.out.println(next);
-        }
     }
 
     @Override
@@ -45,15 +38,7 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
     }
 
     DirectedAcyclicGraph<Class<?>, DefaultEdge> getContextGraph() {
-        return contextGraph;
-    }
-
-    private Object constructObject(Constructor<?> constructor, Object[] args) {
-        try {
-            return constructor.newInstance(args);
-        } catch (Exception ex) {
-            throw new RuntimeException(ex);
-        }
+        return dependencyGraph;
     }
 
     private void fillGraphByClass(DirectedAcyclicGraph<Class<?>, DefaultEdge> contextGraph, Class<?> clazz) {
@@ -82,41 +67,82 @@ public class ConfigurationClassApplicationContext implements ApplicationContext 
         fillGraphByClass(contextGraph, superclass);
     }
 
-    private void fillDependenciesGraph(DirectedAcyclicGraph<Class<?>, DefaultEdge> classesGraph, Map<Class<?>, Object> instancesCtx) {
-        List<Pair<Class<?>, Class<?>>> edges = new ArrayList<>();
+    private void fillDependenciesGraph(
+            DirectedAcyclicGraph<Class<?>, DefaultEdge> classesGraph,
+            DirectedAcyclicGraph<Class<?>, DefaultEdge> dependencyGraph
+    ) {
 
-        for (Class<?> clazz : classesGraph) {
-            if (!instancesCtx.containsKey(clazz)) {
+        for (Class<?> dependency : dependencyGraph.vertexSet()) {
+            Constructor<?> constructor = getDefaultConstructor(dependency);
+
+            Parameter[] parameters = constructor.getParameters();
+            if (parameters.length == 0) {
                 continue;
             }
 
-            Constructor<?>[] constructors = clazz.getConstructors();
-            if (constructors.length != 1) {
-                throw new IllegalArgumentException("Find more than 1 constructor in " + clazz.getName());
-            }
-
-            Constructor<?> constructor = constructors[0];
-            for (Parameter parameter : constructor.getParameters()) {
+            for (Parameter parameter : parameters) {
                 Class<?> parameterType = parameter.getType();
 
-                if (instancesCtx.containsKey(parameterType)) {
-                    edges.add(Pair.of(parameterType, clazz));
-                } else {
-                    for (Class<?> descendant : classesGraph.getDescendants(parameterType)) {
-                        if (instancesCtx.containsKey(descendant)) {
-                            edges.add(Pair.of(descendant, clazz));
-                            break;
-                        }
-                    }
+                if (!classesGraph.containsVertex(parameterType)) {
+                    throw new IllegalArgumentException(dependency + " " + constructor + " " + parameter + " dependency not found");
                 }
+
+                List<Class<?>> injectCandidates = new ArrayList<>();
+                DepthFirstIterator<Class<?>, DefaultEdge> candidatesIterator =
+                        new DepthFirstIterator<>(classesGraph, parameterType);
+
+                while (candidatesIterator.hasNext()) {
+                    Class<?> next = candidatesIterator.next();
+                    int modifiers = next.getModifiers();
+                    if (Modifier.isInterface(modifiers) || Modifier.isAbstract(modifiers)) {
+                        continue;
+                    }
+
+                    injectCandidates.add(next);
+                }
+
+                if (injectCandidates.isEmpty()) {
+                    throw new IllegalArgumentException(dependency + " " + constructor + " " + parameter + " dependency not found");
+                } else if (injectCandidates.size() > 1) {
+                    throw new IllegalArgumentException(dependency + " " + constructor + " " + parameter + " find more than one inject candidate = " + injectCandidates.toString());
+                }
+
+                Class<?> aClass = injectCandidates.get(0);
+                dependencyGraph.addEdge(aClass, dependency);
             }
         }
+    }
 
-        for (Pair<Class<?>, Class<?>> edge : edges) {
-            Class<?> source = edge.getLeft();
-            Class<?> dependency = edge.getRight();
 
-            contextGraph.addEdge(source, dependency);
+    private void fillContext(
+            DirectedAcyclicGraph<Class<?>, DefaultEdge> dependencyGraph,
+            Map<Class<?>, Object> context
+    ) {
+        for (Class<?> aClass : dependencyGraph) {
+            for (Class<?> parameter : dependencyGraph.getAncestors(aClass)) {
+                Object o = context.get(parameter);
+            }
         }
     }
+
+    private Constructor<?> getDefaultConstructor(Class<?> clazz) {
+        Constructor<?>[] constructors = clazz.getConstructors();
+        if (constructors.length == 0) {
+            throw new IllegalArgumentException(clazz + " has no constructors");
+        } else if (constructors.length > 1) {
+            throw new IllegalArgumentException(clazz + " has more than one constructor");
+        }
+
+        return constructors[0];
+    }
+
+    private Object constructObject(Constructor<?> constructor, Object[] args) {
+        try {
+            return constructor.newInstance(args);
+        } catch (Exception ex) {
+            throw new RuntimeException(ex);
+        }
+    }
+
+
 }
